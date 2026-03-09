@@ -18,7 +18,7 @@ use crate::{
     model::{
         Context, DatasetInfo, EventGlyph, LogEntry, Sample, ScaleMode, SeriesKey, ValueConfig,
     },
-    plot::sample_to_plot,
+    plot::{format_num_per_1e9, format_ratio, pct_change, sample_to_plot},
     protocol::{self, IngestRecord},
     ui,
 };
@@ -172,11 +172,11 @@ impl App {
                             self.log_height = self.log_height.saturating_add(1).min(30);
                         }
 
-                        KeyCode::Char('j') => {
+                        KeyCode::Char('J') => {
                             self.log_scroll = self.log_scroll.saturating_add(1);
                         }
 
-                        KeyCode::Char('k') => {
+                        KeyCode::Char('K') => {
                             self.log_scroll = self.log_scroll.saturating_sub(1);
                         }
 
@@ -236,6 +236,11 @@ impl App {
         let color = self.color_for_series(record.series_key);
         let ts = Utc::now();
 
+        let prev_sample = self.contexts[id]
+            .datasets
+            .get(&record.series_key)
+            .and_then(|ds| ds.points.back().copied());
+
         if let Some(event) = &record.event {
             if let Some(json) = &event.parsed_json {
                 let ctx = &mut self.contexts[id];
@@ -258,21 +263,29 @@ impl App {
                 .unwrap()
                 .add(record.sample);
 
+            let ratio_now = format_ratio(record.sample.num, record.sample.den);
+            let per_1e9_now = format_num_per_1e9(record.sample.num);
+
+            let pct_prev = prev_sample.and_then(|prev| {
+                let prev_v = self.value_cfg.value_of(&prev)?;
+                let cur_v = self.value_cfg.value_of(&record.sample)?;
+                pct_change(prev_v, cur_v)
+            });
+
             let mut text = format!(
-                "{} -> x={} num={} den={}",
+                "{} -> x={} num={} den={} ratio={} num/1e9={}",
                 record.series_key.display_name(),
                 record.sample.x_us,
                 record.sample.num,
-                record.sample.den
+                record.sample.den,
+                ratio_now,
+                per_1e9_now,
             );
 
-            if let Some(event) = &record.event {
-                text.push_str(" | event");
-                if event.parsed_json.is_some() {
-                    text.push_str(":json");
-                } else {
-                    text.push_str(":raw");
-                }
+            if let Some(p) = pct_prev {
+                text.push_str(&format!(" delta={:+.1}%", p));
+            } else {
+                text.push_str(" delta=n/a");
             }
 
             context.logs.add(LogEntry {

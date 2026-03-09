@@ -1,7 +1,8 @@
 use chrono::{TimeZone, Utc};
 use ratatui::{
     layout::Rect,
-    text::Span,
+    style::{Color, Style},
+    text::{Line, Span},
     widgets::Block,
 };
 
@@ -89,51 +90,90 @@ pub fn format_sci(x: f64) -> String {
     format!("{mantissa}e{:+}", exp_num)
 }
 
-pub fn pct_change(from: f64, to: f64) -> f64 {
-    ((to / from) - 1.0) * 100.0
+pub fn pct_change(from: f64, to: f64) -> Option<f64> {
+    if from == 0.0 || !from.is_finite() || !to.is_finite() {
+        None
+    } else {
+        Some(((to / from) - 1.0) * 100.0)
+    }
+}
+
+pub fn pct_color(pct: f64) -> Color {
+    let mag = (pct.abs() / 100.0).min(1.0);
+
+    let gray = (140.0 * (1.0 - mag)) as u8;
+    let strong = (110.0 + 145.0 * mag) as u8;
+
+    if pct >= 0.0 {
+        Color::Rgb(gray, strong, gray)
+    } else {
+        Color::Rgb(strong, gray, gray)
+    }
+}
+
+pub fn pct_span(pct: Option<f64>) -> Span<'static> {
+    match pct {
+        Some(v) => Span::styled(format!("{:+.1}%", v), Style::default().fg(pct_color(v))),
+        None => Span::styled("n/a", Style::default().fg(Color::DarkGray)),
+    }
 }
 
 pub fn format_y_labels(
     levels: [f64; 3],
     scale_mode: ScaleMode,
     _value_cfg: ValueConfig,
-) -> Vec<Span<'static>> {
+) -> Vec<Line<'static>> {
     match scale_mode {
         ScaleMode::Linear => levels
             .into_iter()
-            .map(|v| Span::raw(format_sci(v)))
+            .map(|v| Line::from(Span::raw(format_sci(v))))
             .collect(),
         ScaleMode::Log10 => {
             let linear = levels.map(|v| 10f64.powf(v));
 
             vec![
-                Span::raw(format!(
-                    "{} {:+.1}% {:+.1}%",
-                    format_sci(linear[0]),
-                    pct_change(linear[0], linear[1]),
-                    pct_change(linear[0], linear[2]),
-                )),
-                Span::raw(format!(
-                    "{} {:+.1}% {:+.1}%",
-                    format_sci(linear[1]),
-                    pct_change(linear[1], linear[0]),
-                    pct_change(linear[1], linear[2]),
-                )),
-                Span::raw(format!(
-                    "{} {:+.1}% {:+.1}%",
-                    format_sci(linear[2]),
-                    pct_change(linear[2], linear[1]),
-                    pct_change(linear[2], linear[0]),
-                )),
+                Line::from(vec![
+                    Span::raw(format_sci(linear[0])),
+                    Span::raw(" "),
+                    pct_span(pct_change(linear[0], linear[1])),
+                    Span::raw(" "),
+                    pct_span(pct_change(linear[0], linear[2])),
+                ]),
+                Line::from(vec![
+                    Span::raw(format_sci(linear[1])),
+                    Span::raw(" "),
+                    pct_span(pct_change(linear[1], linear[0])),
+                    Span::raw(" "),
+                    pct_span(pct_change(linear[1], linear[2])),
+                ]),
+                Line::from(vec![
+                    Span::raw(format_sci(linear[2])),
+                    Span::raw(" "),
+                    pct_span(pct_change(linear[2], linear[1])),
+                    Span::raw(" "),
+                    pct_span(pct_change(linear[2], linear[0])),
+                ]),
             ]
         }
     }
 }
 
+pub fn format_ratio(num: u64, den: u64) -> String {
+    if den == 0 {
+        "n/a".to_string()
+    } else {
+        format_sci(num as f64 / den as f64)
+    }
+}
+
+pub fn format_num_per_1e9(num: u64) -> String {
+    format_sci(num as f64 / 1e9f64)
+}
+
 pub fn estimate_plot_area(chart_area: Rect) -> Rect {
     let inner = Block::bordered().inner(chart_area);
 
-    let left_for_y_labels = 16u16;
+    let left_for_y_labels = 24u16;
     let bottom_for_x_labels = 2u16;
 
     let x = inner.x.saturating_add(left_for_y_labels);

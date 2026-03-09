@@ -3,7 +3,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     prelude::*,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span, Text},
     widgets::*,
@@ -13,7 +13,7 @@ use crate::{
     app::App,
     model::{ScaleMode, SeriesKey},
     plot::{
-        estimate_plot_area, format_times, format_y_labels, project_to_cell,
+        estimate_plot_area, format_times, format_y_labels, pct_change, pct_color, project_to_cell,
         strip_redundant_parts,
     },
 };
@@ -89,17 +89,32 @@ fn draw_logs(app: &App, f: &mut Frame, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    for (entry, ts) in ctx.logs.msgs.iter().zip(stripped_times.iter()) {
+    for (idx, (entry, ts)) in ctx.logs.msgs.iter().zip(stripped_times.iter()).enumerate() {
         let prefix = format!("{ts} ");
 
-        lines.push(Line::from(vec![
+        let mut top = vec![
             Span::styled(prefix, Style::default().fg(Color::DarkGray)),
             Span::raw(entry.text.clone()),
-        ]));
+        ];
+
+        if let Some(delta) = extract_delta_from_text(&entry.text) {
+            top.push(Span::raw(" "));
+            top.push(Span::styled(
+                format!("{:+.1}%", delta),
+                Style::default().fg(pct_color(delta)).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        lines.push(Line::from(top));
 
         if let Some(event) = &entry.event {
             if let Some(json) = &event.parsed_json {
-                append_json_lines(&mut lines, json, &ctx.event_field_colors, 2);
+                append_json_compact_lines(
+                    &mut lines,
+                    json,
+                    &ctx.event_field_colors,
+                    area.width.saturating_sub(4) as usize,
+                );
             } else {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
@@ -107,6 +122,10 @@ fn draw_logs(app: &App, f: &mut Frame, area: Rect) {
                     Span::raw(event.raw.clone()),
                 ]));
             }
+        }
+
+        if idx + 1 < ctx.logs.msgs.len() {
+            lines.push(Line::from(""));
         }
     }
 
@@ -118,7 +137,61 @@ fn draw_logs(app: &App, f: &mut Frame, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-fn append_json_lines(
+fn append_json_compact_lines(
+    out: &mut Vec<Line<'static>>,
+    value: &serde_json::Value,
+    colors: &std::collections::HashMap<String, Color>,
+    max_width: usize,
+) {
+    if let Some(line) = json_object_one_line(value, colors, max_width) {
+        out.push(line);
+    } else {
+        append_json_multiline(out, value, colors, 2);
+    }
+}
+
+fn json_object_one_line(
+    value: &serde_json::Value,
+    colors: &std::collections::HashMap<String, Color>,
+    max_width: usize,
+) -> Option<Line<'static>> {
+    let serde_json::Value::Object(map) = value else {
+        return None;
+    };
+
+    let mut plain_len = 2usize;
+    let mut spans = vec![Span::raw("  {")];
+    let mut first = true;
+
+    for (k, v) in map {
+        let val = compact_json_scalar(v);
+        let piece_len = if first { 0 } else { 2 } + k.len() + 2 + val.len();
+
+        if plain_len + piece_len + 1 > max_width {
+            return None;
+        }
+
+        if !first {
+            spans.push(Span::raw(", "));
+            plain_len += 2;
+        }
+
+        let c = *colors.get(k).unwrap_or(&Color::Cyan);
+        spans.push(Span::styled(
+            format!("{k}: "),
+            Style::default().fg(c).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(val.clone()));
+
+        plain_len += k.len() + 2 + val.len();
+        first = false;
+    }
+
+    spans.push(Span::raw("}"));
+    Some(Line::from(spans))
+}
+
+fn append_json_multiline(
     out: &mut Vec<Line<'static>>,
     value: &serde_json::Value,
     colors: &std::collections::HashMap<String, Color>,
@@ -138,7 +211,7 @@ fn append_json_lines(
                                 Style::default().fg(field_color).add_modifier(Modifier::BOLD),
                             ),
                         ]));
-                        append_json_lines(out, v, colors, indent + 2);
+                        append_json_multiline(out, v, colors, indent + 2);
                     }
                     _ => {
                         out.push(Line::from(vec![
@@ -161,7 +234,7 @@ fn append_json_lines(
                             Span::raw(" ".repeat(indent)),
                             Span::styled(format!("[{idx}]"), Style::default().fg(Color::Gray)),
                         ]));
-                        append_json_lines(out, item, colors, indent + 2);
+                        append_json_multiline(out, item, colors, indent + 2);
                     }
                     _ => {
                         out.push(Line::from(vec![
@@ -187,6 +260,15 @@ fn compact_json_scalar(v: &serde_json::Value) -> String {
         serde_json::Value::String(s) => format!("{s:?}"),
         _ => serde_json::to_string(v).unwrap_or_else(|_| "<invalid-json>".to_string()),
     }
+}
+
+fn extract_delta_from_text(text: &str) -> Option<f64> {
+    let needle = "delta=";
+    let idx = text.find(needle)?;
+    let rest = &text[idx + needle.len()..];
+    let token = rest.split_whitespace().next()?;
+    let token = token.strip_suffix('%').unwrap_or(token);
+    token.parse::<f64>().ok()
 }
 
 fn draw_contexts(app: &mut App, f: &mut Frame, area: Rect) {
