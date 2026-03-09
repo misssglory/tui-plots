@@ -9,6 +9,25 @@ pub struct Sample {
     pub den: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SeriesKey {
+    Numeric(usize),
+    Event(char),
+}
+
+impl SeriesKey {
+    pub fn is_event(&self) -> bool {
+        matches!(self, Self::Event(_))
+    }
+
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Numeric(n) => format!("ds{}", n),
+            Self::Event(ch) => format!("event:{ch}"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct DatasetInfo {
     pub points: VecDeque<Sample>,
@@ -55,10 +74,10 @@ impl LogBuffer {
 pub struct Context {
     pub name: String,
     pub created_at: DateTime<Utc>,
-    pub datasets: HashMap<usize, DatasetInfo>,
-    pub order: Vec<usize>,
+    pub datasets: HashMap<SeriesKey, DatasetInfo>,
+    pub order: Vec<SeriesKey>,
     pub logs: LogBuffer,
-    pub colors: HashMap<usize, Color>,
+    pub colors: HashMap<SeriesKey, Color>,
 }
 
 impl Context {
@@ -125,7 +144,7 @@ impl Default for ValueConfig {
     fn default() -> Self {
         Self {
             mode: ValueMode::Ratio,
-            const_den: 1_000_000_000,
+            const_den: 1_000_000,
         }
     }
 }
@@ -180,4 +199,12 @@ impl ScaleMode {
             Self::Log10 => "log10",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EventGlyph {
+    pub x: f64,
+    pub y: f64,
+    pub ch: char,
+    pub color: Color,
 }

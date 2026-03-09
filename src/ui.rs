@@ -3,15 +3,16 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     prelude::*,
+    style::{Modifier, Style},
     symbols,
-    text::Span,
+    text::{Line, Span},
     widgets::*,
 };
 
 use crate::{
     app::App,
-    model::ScaleMode,
-    plot::{format_times, format_y_labels},
+    model::{ScaleMode, SeriesKey},
+    plot::{estimate_plot_area, format_times, format_y_labels, project_to_cell},
 };
 
 pub fn draw(app: &mut App, f: &mut Frame) {
@@ -123,36 +124,44 @@ fn draw_contexts(app: &mut App, f: &mut Frame, area: Rect) {
 fn draw_chart_area(app: &App, f: &mut Frame, area: Rect) {
     let ctx = app.ctx();
 
-    let points: Vec<Vec<(f64, f64)>> = ctx
+    let built: Vec<(SeriesKey, Vec<(f64, f64)>)> = ctx
         .order
         .iter()
-        .filter_map(|id| ctx.datasets.get(id))
-        .map(|d| app.build_plot_points(&d.points))
+        .filter_map(|key| {
+            ctx.datasets.get(key).map(|d| {
+                let pts = app.build_plot_points_for_series(*key, &d.points);
+                (*key, pts)
+            })
+        })
         .collect();
 
-    let datasets: Vec<Dataset> = ctx
-        .order
+    let datasets: Vec<Dataset> = built
         .iter()
-        .enumerate()
-        .filter_map(|(i, id)| {
-            ctx.datasets.get(id).map(|_| {
-                let color = *ctx.colors.get(id).unwrap();
+        .map(|(key, pts)| {
+            let color = *ctx.colors.get(key).unwrap();
 
-                if app.step_y {
-                    Dataset::default()
-                        .name(format!("ds{}", id))
-                        .marker(symbols::Marker::Braille)
-                        .graph_type(GraphType::Line)
-                        .style(Style::default().fg(color))
-                        .data(&points[i])
-                } else {
-                    Dataset::default()
-                        .name(format!("ds{}", id))
-                        .marker(symbols::Marker::Dot)
-                        .style(Style::default().fg(color))
-                        .data(&points[i])
-                }
-            })
+            match key {
+                SeriesKey::Event(ch) => Dataset::default()
+                    .name(format!("event:{ch}"))
+                    .marker(app.event_marker(*ch))
+                    .graph_type(GraphType::Scatter)
+                    .style(Style::default().fg(color))
+                    .data(pts),
+
+                SeriesKey::Numeric(_) if app.step_y => Dataset::default()
+                    .name(key.display_name())
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().fg(color))
+                    .data(pts),
+
+                SeriesKey::Numeric(_) => Dataset::default()
+                    .name(key.display_name())
+                    .marker(symbols::Marker::Dot)
+                    .graph_type(GraphType::Scatter)
+                    .style(Style::default().fg(color))
+                    .data(pts),
+            }
         })
         .collect();
 
@@ -190,4 +199,25 @@ fn draw_chart_area(app: &App, f: &mut Frame, area: Rect) {
         .y_axis(Axis::default().bounds(app.window_y).labels(y_labels));
 
     f.render_widget(chart, area);
+    draw_event_overlay(app, f, area);
+}
+
+fn draw_event_overlay(app: &App, f: &mut Frame, chart_area: Rect) {
+    let plot_area = estimate_plot_area(chart_area);
+    let glyphs = app.build_event_glyphs();
+
+    for glyph in glyphs {
+        if let Some((x, y)) = project_to_cell(
+            plot_area,
+            app.window_x,
+            app.window_y,
+            glyph.x,
+            glyph.y,
+        ) {
+            let cell = Rect::new(x, y, 1, 1);
+            let paragraph = Paragraph::new(Line::from(glyph.ch.to_string()))
+                .style(Style::default().fg(glyph.color).add_modifier(Modifier::BOLD));
+            f.render_widget(paragraph, cell);
+        }
+    }
 }

@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -8,11 +9,14 @@ use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind},
     style::Color,
+    symbols,
     widgets::ListState,
 };
 
 use crate::{
-    model::{Context, DatasetInfo, Sample, ScaleMode, ValueConfig},
+    model::{
+        Context, DatasetInfo, EventGlyph, Sample, ScaleMode, SeriesKey, ValueConfig,
+    },
     plot::sample_to_plot,
     protocol::{self, IngestRecord},
     ui,
@@ -206,26 +210,29 @@ impl App {
 
     fn on_ingest(&mut self, record: IngestRecord) {
         let id = self.get_or_create_context(record.context);
-        let color = self.gen_color(record.dataset_id);
+        let color = self.color_for_series(record.series_key);
 
         {
             let context = &mut self.contexts[id];
 
-            if !context.datasets.contains_key(&record.dataset_id) {
-                context.datasets.insert(record.dataset_id, DatasetInfo::new());
-                context.order.push(record.dataset_id);
-                context.colors.insert(record.dataset_id, color);
+            if !context.datasets.contains_key(&record.series_key) {
+                context.datasets.insert(record.series_key, DatasetInfo::new());
+                context.order.push(record.series_key);
+                context.colors.insert(record.series_key, color);
             }
 
             context
                 .datasets
-                .get_mut(&record.dataset_id)
+                .get_mut(&record.series_key)
                 .unwrap()
                 .add(record.sample);
 
             context.logs.add(format!(
-                "ds{} -> x={} num={} den={}",
-                record.dataset_id, record.sample.x_us, record.sample.num, record.sample.den
+                "{} -> x={} num={} den={}",
+                record.series_key.display_name(),
+                record.sample.x_us,
+                record.sample.num,
+                record.sample.den
             ));
         }
 
@@ -369,6 +376,31 @@ impl App {
         Color::Rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
     }
 
+    pub fn event_color(&self, ch: char) -> Color {
+        match ch {
+            'B' => Color::LightGreen,
+            'S' => Color::LightRed,
+            'T' => Color::Yellow,
+            'W' => Color::LightBlue,
+            'E' => Color::Magenta,
+            '!' => Color::Red,
+            '?' => Color::Cyan,
+            '*' => Color::White,
+            _ => Color::Gray,
+        }
+    }
+
+    pub fn color_for_series(&self, key: SeriesKey) -> Color {
+        match key {
+            SeriesKey::Numeric(id) => self.gen_color(id),
+            SeriesKey::Event(ch) => self.event_color(ch),
+        }
+    }
+
+    pub fn event_marker(&self, _ch: char) -> symbols::Marker {
+        symbols::Marker::Dot
+    }
+
     pub fn dim_color(&self, color: Color, age_seconds: i64) -> Color {
         const MAX_AGE: i64 = 3600;
         let factor = (1.0 - (age_seconds as f64 / MAX_AGE as f64).min(1.0)).max(0.3);
@@ -383,16 +415,17 @@ impl App {
         }
     }
 
-    pub fn build_plot_points(
+    pub fn build_plot_points_for_series(
         &self,
-        src: &std::collections::VecDeque<Sample>,
+        key: SeriesKey,
+        src: &VecDeque<Sample>,
     ) -> Vec<(f64, f64)> {
         let base: Vec<(f64, f64)> = src
             .iter()
             .filter_map(|s| sample_to_plot(s, self.value_cfg, self.scale_mode))
             .collect();
 
-        if !self.step_y || base.len() < 2 {
+        if key.is_event() || !self.step_y || base.len() < 2 {
             return base;
         }
 
@@ -404,6 +437,30 @@ impl App {
             let (x1, y1) = w[1];
             out.push((x1, y0));
             out.push((x1, y1));
+        }
+
+        out
+    }
+
+    pub fn build_event_glyphs(&self) -> Vec<EventGlyph> {
+        let ctx = self.ctx();
+        let mut out = Vec::new();
+
+        for key in &ctx.order {
+            let SeriesKey::Event(ch) = *key else { continue };
+            let Some(ds) = ctx.datasets.get(key) else { continue };
+            let color = *ctx.colors.get(key).unwrap_or(&Color::White);
+
+            for s in &ds.points {
+                if let Some((x, y)) = sample_to_plot(s, self.value_cfg, self.scale_mode) {
+                    out.push(EventGlyph {
+                        x,
+                        y,
+                        ch,
+                        color,
+                    });
+                }
+            }
         }
 
         out

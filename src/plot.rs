@@ -1,5 +1,9 @@
 use chrono::{TimeZone, Utc};
-use ratatui::text::Span;
+use ratatui::{
+    layout::Rect,
+    text::Span,
+    widgets::{Axis, Block},
+};
 
 use crate::model::{Sample, ScaleMode, ValueConfig};
 
@@ -101,10 +105,11 @@ pub fn format_y_labels(
             .collect(),
         ScaleMode::Log10 => {
             let linear = levels.map(|v| 10f64.powf(v));
+            let prefix = value_cfg.label();
 
             vec![
                 Span::raw(format!(
-                    "{}{:+.1}% {:+.1}%",
+                    "{} {:+.1}% {:+.1}%",
                     format_sci(linear[0]),
                     pct_change(linear[0], linear[1]),
                     pct_change(linear[0], linear[2]),
@@ -124,4 +129,59 @@ pub fn format_y_labels(
             ]
         }
     }
+}
+
+/// Chart does not expose its exact plot viewport publicly, so this is a practical
+/// estimate for overlaying event glyphs over the plot body.
+pub fn estimate_plot_area(chart_area: Rect) -> Rect {
+    let inner = Block::bordered().inner(chart_area);
+
+    let left_for_y_labels = 16u16;
+    let bottom_for_x_labels = 2u16;
+
+    let x = inner.x.saturating_add(left_for_y_labels);
+    let y = inner.y;
+    let width = inner.width.saturating_sub(left_for_y_labels);
+    let height = inner.height.saturating_sub(bottom_for_x_labels);
+
+    Rect::new(x, y, width, height)
+}
+
+pub fn project_to_cell(
+    plot_area: Rect,
+    window_x: [f64; 2],
+    window_y: [f64; 2],
+    x: f64,
+    y: f64,
+) -> Option<(u16, u16)> {
+    if plot_area.width == 0 || plot_area.height == 0 {
+        return None;
+    }
+
+    let x0 = window_x[0];
+    let x1 = window_x[1];
+    let y0 = window_y[0];
+    let y1 = window_y[1];
+
+    if !(x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite()) {
+        return None;
+    }
+
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    if x < x0 || x > x1 || y < y0 || y > y1 {
+        return None;
+    }
+
+    let xr = (x - x0) / (x1 - x0);
+    let yr = (y - y0) / (y1 - y0);
+
+    let col = plot_area.x + ((xr * (plot_area.width.saturating_sub(1) as f64)).round() as u16);
+    let row = plot_area.y
+        + plot_area.height.saturating_sub(1)
+        - ((yr * (plot_area.height.saturating_sub(1) as f64)).round() as u16);
+
+    Some((col, row))
 }

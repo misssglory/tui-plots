@@ -5,14 +5,14 @@ use std::{
     thread,
 };
 
-use crate::model::Sample;
+use crate::model::{Sample, SeriesKey};
 
 pub const SOCKET_PATH: &str = "/tmp/chart_server.sock";
 
 #[derive(Debug, Clone)]
 pub struct IngestRecord {
     pub context: String,
-    pub dataset_id: usize,
+    pub series_key: SeriesKey,
     pub sample: Sample,
 }
 
@@ -36,7 +36,6 @@ fn handle_client(stream: UnixStream, tx: mpsc::Sender<IngestRecord>) {
 
     for line in reader.lines() {
         let Ok(line) = line else { continue };
-
         if let Some(record) = parse_line(&line) {
             let _ = tx.send(record);
         }
@@ -44,10 +43,15 @@ fn handle_client(stream: UnixStream, tx: mpsc::Sender<IngestRecord>) {
 }
 
 /// Protocol:
-/// context,dataset_id,x_us,num,den
+/// context,series_key,x_us,num,den
 ///
-/// Example:
+/// series_key may be:
+/// - numeric dataset index: 0,1,2
+/// - single-char event key: B,S,T,!,?
+///
+/// examples:
 /// default,0,1700000000123456,123,1000
+/// default,B,1700000001123456,1,1
 pub fn parse_line(line: &str) -> Option<IngestRecord> {
     let parts: Vec<&str> = line.trim().split(',').collect();
     if parts.len() != 5 {
@@ -55,14 +59,28 @@ pub fn parse_line(line: &str) -> Option<IngestRecord> {
     }
 
     let context = parts[0].trim().chars().take(50).collect::<String>();
-    let dataset_id = parts[1].trim().parse::<usize>().ok()?;
+    let series_key = parse_series_key(parts[1].trim())?;
     let x_us = parts[2].trim().parse::<i64>().ok()?;
     let num = parts[3].trim().parse::<u64>().ok()?;
     let den = parts[4].trim().parse::<u64>().ok()?;
 
     Some(IngestRecord {
         context,
-        dataset_id,
+        series_key,
         sample: Sample { x_us, num, den },
     })
+}
+
+fn parse_series_key(raw: &str) -> Option<SeriesKey> {
+    if let Ok(n) = raw.parse::<usize>() {
+        return Some(SeriesKey::Numeric(n));
+    }
+
+    let mut chars = raw.chars();
+    let ch = chars.next()?;
+    if chars.next().is_none() {
+        return Some(SeriesKey::Event(ch));
+    }
+
+    None
 }
