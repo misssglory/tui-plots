@@ -1,0 +1,411 @@
+use std::{
+    sync::mpsc,
+    time::{Duration, Instant},
+};
+
+use color_eyre::Result;
+use ratatui::{
+    DefaultTerminal,
+    crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind},
+    style::Color,
+    widgets::ListState,
+};
+
+use crate::{
+    model::{Context, DatasetInfo, Sample, ScaleMode, ValueConfig},
+    plot::sample_to_plot,
+    protocol::{self, IngestRecord},
+    ui,
+};
+
+pub struct App {
+    pub contexts: Vec<Context>,
+    pub active: usize,
+    pub context_list_state: ListState,
+
+    pub window_x: [f64; 2],
+    pub window_y: [f64; 2],
+
+    pub show_logs: bool,
+    pub auto_x: bool,
+    pub auto_y: bool,
+    pub step_y: bool,
+
+    pub scale_mode: ScaleMode,
+    pub value_cfg: ValueConfig,
+}
+
+impl App {
+    pub fn new() -> Self {
+        let default = Context::new("default".into());
+
+        let mut context_list_state = ListState::default();
+        context_list_state.select(Some(0));
+
+        Self {
+            contexts: vec![default],
+            active: 0,
+            context_list_state,
+
+            window_x: [0.0, 50.0],
+            window_y: [-2.0, 2.0],
+
+            show_logs: true,
+            auto_x: true,
+            auto_y: true,
+            step_y: false,
+
+            scale_mode: ScaleMode::Linear,
+            value_cfg: ValueConfig::default(),
+        }
+    }
+
+    pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+        let (tx, rx) = mpsc::channel::<IngestRecord>();
+        protocol::start_socket_server(tx);
+
+        let tick = Duration::from_millis(50);
+        let mut last = Instant::now();
+
+        loop {
+            while let Ok(record) = rx.try_recv() {
+                self.on_ingest(record);
+            }
+
+            terminal.draw(|f| ui::draw(&mut self, f))?;
+
+            let timeout = tick.saturating_sub(last.elapsed());
+
+            if event::poll(timeout)? {
+                match event::read()? {
+                    Event::Key(k) if k.kind == KeyEventKind::Press => match k.code {
+                        KeyCode::Char('q') => return Ok(()),
+
+                        KeyCode::Left => {
+                            if k.modifiers.contains(event::KeyModifiers::CONTROL) {
+                                self.scale_x(0.8);
+                            } else {
+                                self.scroll_x(-0.005);
+                            }
+                        }
+
+                        KeyCode::Right => {
+                            if k.modifiers.contains(event::KeyModifiers::CONTROL) {
+                                self.scale_x(1.2);
+                            } else {
+                                self.scroll_x(0.005);
+                            }
+                        }
+
+                        KeyCode::Down => {
+                            if self.active + 1 < self.contexts.len() {
+                                self.active += 1;
+                                self.apply_auto_fit();
+                            }
+                        }
+
+                        KeyCode::Up => {
+                            if self.active > 0 {
+                                self.active -= 1;
+                                self.apply_auto_fit();
+                            }
+                        }
+
+                        KeyCode::PageDown => {
+                            let off = self.context_list_state.offset();
+                            *self.context_list_state.offset_mut() = off.saturating_add(5);
+                        }
+
+                        KeyCode::PageUp => {
+                            let off = self.context_list_state.offset();
+                            *self.context_list_state.offset_mut() = off.saturating_sub(5);
+                        }
+
+                        KeyCode::Char('g') => {
+                            self.scale_mode = self.scale_mode.toggle();
+                            if self.auto_y {
+                                self.fit_y();
+                            }
+                        }
+
+                        KeyCode::Char('a') => {
+                            self.auto_x = !self.auto_x;
+                            if self.auto_x {
+                                self.fit_x();
+                            }
+                        }
+
+                        KeyCode::Char('s') => {
+                            self.auto_y = !self.auto_y;
+                            if self.auto_y {
+                                self.fit_y();
+                            }
+                        }
+
+                        KeyCode::Char('x') => self.fit_x(),
+                        KeyCode::Char('y') => self.fit_y(),
+                        KeyCode::Char('f') => {
+                            self.fit_x();
+                            self.fit_y();
+                        }
+
+                        KeyCode::Char('l') => {
+                            self.show_logs = !self.show_logs;
+                        }
+
+                        KeyCode::Char('p') => {
+                            self.step_y = !self.step_y;
+                        }
+
+                        KeyCode::Char('m') => {
+                            self.value_cfg.mode = self.value_cfg.mode.next();
+                            if self.auto_y {
+                                self.fit_y();
+                            }
+                        }
+
+                        KeyCode::Char('+') | KeyCode::Char('=') => {
+                            self.value_cfg.const_den = self.value_cfg.const_den.saturating_mul(10);
+                            if self.value_cfg.const_den == 0 {
+                                self.value_cfg.const_den = 1;
+                            }
+                            if self.auto_y {
+                                self.fit_y();
+                            }
+                        }
+
+                        KeyCode::Char('-') => {
+                            self.value_cfg.const_den = (self.value_cfg.const_den / 10).max(1);
+                            if self.auto_y {
+                                self.fit_y();
+                            }
+                        }
+
+                        _ => {}
+                    },
+
+                    Event::Mouse(m) => {
+                        if let MouseEventKind::Down(_) = m.kind {
+                            let index = m.row.saturating_sub(1) as usize;
+                            if index < self.contexts.len() {
+                                self.active = index;
+                                self.apply_auto_fit();
+                            }
+                        }
+                    }
+
+                    _ => {}
+                }
+            }
+
+            if last.elapsed() >= tick {
+                last = Instant::now();
+            }
+        }
+    }
+
+    fn on_ingest(&mut self, record: IngestRecord) {
+        let id = self.get_or_create_context(record.context);
+        let color = self.gen_color(record.dataset_id);
+
+        {
+            let context = &mut self.contexts[id];
+
+            if !context.datasets.contains_key(&record.dataset_id) {
+                context.datasets.insert(record.dataset_id, DatasetInfo::new());
+                context.order.push(record.dataset_id);
+                context.colors.insert(record.dataset_id, color);
+            }
+
+            context
+                .datasets
+                .get_mut(&record.dataset_id)
+                .unwrap()
+                .add(record.sample);
+
+            context.logs.add(format!(
+                "ds{} -> x={} num={} den={}",
+                record.dataset_id, record.sample.x_us, record.sample.num, record.sample.den
+            ));
+        }
+
+        if id == self.active {
+            self.apply_auto_fit();
+        }
+    }
+
+    pub fn ctx(&self) -> &Context {
+        &self.contexts[self.active]
+    }
+
+    pub fn sync_context_list_state(&mut self, area_height: usize) {
+        self.context_list_state.select(Some(self.active));
+
+        let visible = area_height.saturating_sub(2).max(1);
+        let offset = self.context_list_state.offset();
+
+        if self.active < offset {
+            *self.context_list_state.offset_mut() = self.active;
+        } else if self.active >= offset + visible {
+            *self.context_list_state.offset_mut() = self.active + 1 - visible;
+        }
+    }
+
+    pub fn apply_auto_fit(&mut self) {
+        if self.auto_x {
+            self.fit_x();
+        }
+        if self.auto_y {
+            self.fit_y();
+        }
+    }
+
+    pub fn fit_x(&mut self) {
+        let ctx = self.ctx();
+
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+
+        for ds in ctx.datasets.values() {
+            for s in &ds.points {
+                let x = s.x_us as f64;
+                min = min.min(x);
+                max = max.max(x);
+            }
+        }
+
+        if min.is_finite() && max.is_finite() {
+            if min == max {
+                self.window_x = [min - 1.0, max + 1.0];
+            } else {
+                let pad = (max - min) * 0.05;
+                self.window_x = [min - pad, max + pad];
+            }
+        }
+    }
+
+    pub fn fit_y(&mut self) {
+        let ctx = self.ctx();
+
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+
+        for ds in ctx.datasets.values() {
+            for s in &ds.points {
+                if let Some((_, y)) = sample_to_plot(s, self.value_cfg, self.scale_mode) {
+                    min = min.min(y);
+                    max = max.max(y);
+                }
+            }
+        }
+
+        if min.is_finite() && max.is_finite() {
+            if min == max {
+                let pad = min.abs() * 0.1 + 1.0;
+                self.window_y = [min - pad, max + pad];
+            } else {
+                let pad = (max - min) * 0.05;
+                self.window_y = [min - pad, max + pad];
+            }
+        }
+    }
+
+    pub fn scroll_x(&mut self, frac: f64) {
+        let width = self.window_x[1] - self.window_x[0];
+        let delta = width * frac;
+
+        let w1 = f64::max(0.0, self.window_x[0] + delta);
+        let w2 = f64::max(0.0, self.window_x[1] + delta);
+
+        self.window_x[0] = w1;
+        self.window_x[1] = w2;
+    }
+
+    pub fn scale_x(&mut self, factor: f64) {
+        let mid = (self.window_x[0] + self.window_x[1]) / 2.0;
+        let half = (self.window_x[1] - self.window_x[0]) * factor / 2.0;
+
+        let mut w1 = mid - half;
+        let mut w2 = mid + half;
+
+        if w1 < 0.0 {
+            w2 -= w1;
+            w1 = 0.0;
+        }
+
+        if w2 < 0.0 {
+            w1 -= w2;
+            w2 = 0.0;
+        }
+
+        self.window_x[0] = w1;
+        self.window_x[1] = w2;
+    }
+
+    pub fn get_or_create_context(&mut self, name: String) -> usize {
+        if let Some(i) = self.contexts.iter().position(|c| c.name == name) {
+            return i;
+        }
+
+        let name = name.chars().take(50).collect();
+        self.contexts.push(Context::new(name));
+        self.contexts.len() - 1
+    }
+
+    pub fn gen_color(&self, id: usize) -> Color {
+        let hue = (id as f64 * 0.618).fract() * 360.0;
+        let c = 0.8 * 0.9;
+        let x = c * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+
+        let (r, g, b) = match hue as u32 {
+            0..=59 => (c, x, 0.0),
+            60..=119 => (x, c, 0.0),
+            120..=179 => (0.0, c, x),
+            180..=239 => (0.0, x, c),
+            240..=299 => (x, 0.0, c),
+            _ => (c, 0.0, x),
+        };
+
+        Color::Rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+    }
+
+    pub fn dim_color(&self, color: Color, age_seconds: i64) -> Color {
+        const MAX_AGE: i64 = 3600;
+        let factor = (1.0 - (age_seconds as f64 / MAX_AGE as f64).min(1.0)).max(0.3);
+
+        match color {
+            Color::Rgb(r, g, b) => Color::Rgb(
+                (r as f64 * factor) as u8,
+                (g as f64 * factor) as u8,
+                (b as f64 * factor) as u8,
+            ),
+            _ => color,
+        }
+    }
+
+    pub fn build_plot_points(
+        &self,
+        src: &std::collections::VecDeque<Sample>,
+    ) -> Vec<(f64, f64)> {
+        let base: Vec<(f64, f64)> = src
+            .iter()
+            .filter_map(|s| sample_to_plot(s, self.value_cfg, self.scale_mode))
+            .collect();
+
+        if !self.step_y || base.len() < 2 {
+            return base;
+        }
+
+        let mut out = Vec::with_capacity(base.len() * 2 - 1);
+        out.push(base[0]);
+
+        for w in base.windows(2) {
+            let (_, y0) = w[0];
+            let (x1, y1) = w[1];
+            out.push((x1, y0));
+            out.push((x1, y1));
+        }
+
+        out
+    }
+}
