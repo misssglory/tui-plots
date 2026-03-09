@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 use ratatui::{
     layout::Rect,
     text::Span,
-    widgets::{Axis, Block},
+    widgets::Block,
 };
 
 use crate::model::{Sample, ScaleMode, ValueConfig};
@@ -96,7 +96,7 @@ pub fn pct_change(from: f64, to: f64) -> f64 {
 pub fn format_y_labels(
     levels: [f64; 3],
     scale_mode: ScaleMode,
-    value_cfg: ValueConfig,
+    _value_cfg: ValueConfig,
 ) -> Vec<Span<'static>> {
     match scale_mode {
         ScaleMode::Linear => levels
@@ -105,7 +105,6 @@ pub fn format_y_labels(
             .collect(),
         ScaleMode::Log10 => {
             let linear = levels.map(|v| 10f64.powf(v));
-            let prefix = value_cfg.label();
 
             vec![
                 Span::raw(format!(
@@ -131,8 +130,6 @@ pub fn format_y_labels(
     }
 }
 
-/// Chart does not expose its exact plot viewport publicly, so this is a practical
-/// estimate for overlaying event glyphs over the plot body.
 pub fn estimate_plot_area(chart_area: Rect) -> Rect {
     let inner = Block::bordered().inner(chart_area);
 

@@ -2,6 +2,12 @@ use chrono::{DateTime, Utc};
 use ratatui::style::Color;
 use std::collections::{HashMap, VecDeque};
 
+#[derive(Debug, Clone)]
+pub struct EventMeta {
+    pub raw: String,
+    pub parsed_json: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Sample {
     pub x_us: i64,
@@ -51,8 +57,15 @@ impl DatasetInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub ts: DateTime<Utc>,
+    pub text: String,
+    pub event: Option<EventMeta>,
+}
+
+#[derive(Debug, Clone)]
 pub struct LogBuffer {
-    pub msgs: VecDeque<String>,
+    pub msgs: VecDeque<LogEntry>,
 }
 
 impl LogBuffer {
@@ -62,11 +75,11 @@ impl LogBuffer {
         }
     }
 
-    pub fn add(&mut self, msg: String) {
+    pub fn add(&mut self, entry: LogEntry) {
         if self.msgs.len() >= 100 {
             self.msgs.pop_front();
         }
-        self.msgs.push_back(msg);
+        self.msgs.push_back(entry);
     }
 }
 
@@ -78,6 +91,7 @@ pub struct Context {
     pub order: Vec<SeriesKey>,
     pub logs: LogBuffer,
     pub colors: HashMap<SeriesKey, Color>,
+    pub event_field_colors: HashMap<String, Color>,
 }
 
 impl Context {
@@ -89,6 +103,7 @@ impl Context {
             order: Vec::new(),
             logs: LogBuffer::new(),
             colors: HashMap::new(),
+            event_field_colors: HashMap::new(),
         }
     }
 

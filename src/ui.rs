@@ -5,21 +5,26 @@ use ratatui::{
     prelude::*,
     style::{Modifier, Style},
     symbols,
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::*,
 };
 
 use crate::{
     app::App,
     model::{ScaleMode, SeriesKey},
-    plot::{estimate_plot_area, format_times, format_y_labels, project_to_cell},
+    plot::{
+        estimate_plot_area, format_times, format_y_labels, project_to_cell,
+        strip_redundant_parts,
+    },
 };
 
 pub fn draw(app: &mut App, f: &mut Frame) {
+    let bottom_h = if app.show_logs { app.log_height } else { 3 };
+
     let [contexts, chart, bottom] = Layout::vertical([
         Constraint::Length(8),
         Constraint::Fill(1),
-        Constraint::Length(7),
+        Constraint::Length(bottom_h),
     ])
     .areas(f.area());
 
@@ -56,6 +61,10 @@ fn draw_options(app: &App, f: &mut Frame, area: Rect) {
         ListItem::new(format!("[m] mode    : {}", app.value_cfg.mode.name())),
         ListItem::new(format!("[+] const   : {}", app.value_cfg.const_den)),
         ListItem::new(format!("[-] const   : {}", app.value_cfg.const_den)),
+        ListItem::new(format!("[[] logs-   : {}", app.log_height)),
+        ListItem::new(format!("[]] logs+   : {}", app.log_height)),
+        ListItem::new(format!("[J] log dn  : {}", app.log_scroll)),
+        ListItem::new(format!("[K] log up  : {}", app.log_scroll)),
     ];
 
     let list = List::new(items).block(Block::bordered().title("Options"));
@@ -69,17 +78,115 @@ fn draw_logs(app: &App, f: &mut Frame, area: Rect) {
 
     let ctx = app.ctx();
 
-    let items: Vec<ListItem> = ctx
+    let full_times: Vec<String> = ctx
         .logs
         .msgs
         .iter()
-        .rev()
-        .take(6)
-        .map(|m| ListItem::new(m.clone()))
+        .map(|entry| App::format_log_timestamp_full(entry.ts))
         .collect();
 
-    let logs = List::new(items).block(Block::bordered().title("Logs"));
-    f.render_widget(logs, area);
+    let stripped_times = strip_redundant_parts(&full_times);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (entry, ts) in ctx.logs.msgs.iter().zip(stripped_times.iter()) {
+        let prefix = format!("{ts} ");
+
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+            Span::raw(entry.text.clone()),
+        ]));
+
+        if let Some(event) = &entry.event {
+            if let Some(json) = &event.parsed_json {
+                append_json_lines(&mut lines, json, &ctx.event_field_colors, 2);
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("raw: ", Style::default().fg(Color::Gray)),
+                    Span::raw(event.raw.clone()),
+                ]));
+            }
+        }
+    }
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(Block::bordered().title("Logs"))
+        .wrap(Wrap { trim: false })
+        .scroll((app.log_scroll, 0));
+
+    f.render_widget(paragraph, area);
+}
+
+fn append_json_lines(
+    out: &mut Vec<Line<'static>>,
+    value: &serde_json::Value,
+    colors: &std::collections::HashMap<String, Color>,
+    indent: usize,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                let field_color = *colors.get(k).unwrap_or(&Color::Cyan);
+
+                match v {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        out.push(Line::from(vec![
+                            Span::raw(" ".repeat(indent)),
+                            Span::styled(
+                                format!("{k}:"),
+                                Style::default().fg(field_color).add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                        append_json_lines(out, v, colors, indent + 2);
+                    }
+                    _ => {
+                        out.push(Line::from(vec![
+                            Span::raw(" ".repeat(indent)),
+                            Span::styled(
+                                format!("{k}: "),
+                                Style::default().fg(field_color).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(compact_json_scalar(v)),
+                        ]));
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                match item {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        out.push(Line::from(vec![
+                            Span::raw(" ".repeat(indent)),
+                            Span::styled(format!("[{idx}]"), Style::default().fg(Color::Gray)),
+                        ]));
+                        append_json_lines(out, item, colors, indent + 2);
+                    }
+                    _ => {
+                        out.push(Line::from(vec![
+                            Span::raw(" ".repeat(indent)),
+                            Span::styled(format!("[{idx}] "), Style::default().fg(Color::Gray)),
+                            Span::raw(compact_json_scalar(item)),
+                        ]));
+                    }
+                }
+            }
+        }
+        _ => {
+            out.push(Line::from(vec![
+                Span::raw(" ".repeat(indent)),
+                Span::raw(compact_json_scalar(value)),
+            ]));
+        }
+    }
+}
+
+fn compact_json_scalar(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("{s:?}"),
+        _ => serde_json::to_string(v).unwrap_or_else(|_| "<invalid-json>".to_string()),
+    }
 }
 
 fn draw_contexts(app: &mut App, f: &mut Frame, area: Rect) {

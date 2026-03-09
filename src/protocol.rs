@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use crate::model::{Sample, SeriesKey};
+use crate::model::{EventMeta, Sample, SeriesKey};
 
 pub const SOCKET_PATH: &str = "/tmp/chart_server.sock";
 
@@ -14,6 +14,7 @@ pub struct IngestRecord {
     pub context: String,
     pub series_key: SeriesKey,
     pub sample: Sample,
+    pub event: Option<EventMeta>,
 }
 
 pub fn start_socket_server(tx: mpsc::Sender<IngestRecord>) {
@@ -43,18 +44,18 @@ fn handle_client(stream: UnixStream, tx: mpsc::Sender<IngestRecord>) {
 }
 
 /// Protocol:
-/// context,series_key,x_us,num,den
+/// context series_key x_us num den [event_payload...]
 ///
-/// series_key may be:
+/// series_key:
 /// - numeric dataset index: 0,1,2
 /// - single-char event key: B,S,T,!,?
 ///
 /// examples:
-/// default,0,1700000000123456,123,1000
-/// default,B,1700000001123456,1,1
+/// default 0 1700000000123456 123 1000
+/// default B 1700000001123456 1 1 {"kind":"buy","price":123}
 pub fn parse_line(line: &str) -> Option<IngestRecord> {
-    let parts: Vec<&str> = line.trim().split(',').collect();
-    if parts.len() != 5 {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 5 {
         return None;
     }
 
@@ -64,10 +65,19 @@ pub fn parse_line(line: &str) -> Option<IngestRecord> {
     let num = parts[3].trim().parse::<u64>().ok()?;
     let den = parts[4].trim().parse::<u64>().ok()?;
 
+    let event = if parts.len() > 5 {
+        let raw = parts[5..].join(" ");
+        let parsed_json = serde_json::from_str::<serde_json::Value>(&raw).ok();
+        Some(EventMeta { raw, parsed_json })
+    } else {
+        None
+    };
+
     Some(IngestRecord {
         context,
         series_key,
         sample: Sample { x_us, num, den },
+        event,
     })
 }
 

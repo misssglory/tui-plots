@@ -1,9 +1,10 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::mpsc,
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use color_eyre::Result;
 use ratatui::{
     DefaultTerminal,
@@ -15,7 +16,7 @@ use ratatui::{
 
 use crate::{
     model::{
-        Context, DatasetInfo, EventGlyph, Sample, ScaleMode, SeriesKey, ValueConfig,
+        Context, DatasetInfo, EventGlyph, LogEntry, Sample, ScaleMode, SeriesKey, ValueConfig,
     },
     plot::sample_to_plot,
     protocol::{self, IngestRecord},
@@ -31,6 +32,9 @@ pub struct App {
     pub window_y: [f64; 2],
 
     pub show_logs: bool,
+    pub log_height: u16,
+    pub log_scroll: u16,
+
     pub auto_x: bool,
     pub auto_y: bool,
     pub step_y: bool,
@@ -55,6 +59,9 @@ impl App {
             window_y: [-2.0, 2.0],
 
             show_logs: true,
+            log_height: 10,
+            log_scroll: 0,
+
             auto_x: true,
             auto_y: true,
             step_y: false,
@@ -157,6 +164,22 @@ impl App {
                             self.show_logs = !self.show_logs;
                         }
 
+                        KeyCode::Char('[') => {
+                            self.log_height = self.log_height.saturating_sub(1).max(3);
+                        }
+
+                        KeyCode::Char(']') => {
+                            self.log_height = self.log_height.saturating_add(1).min(30);
+                        }
+
+                        KeyCode::Char('j') => {
+                            self.log_scroll = self.log_scroll.saturating_add(1);
+                        }
+
+                        KeyCode::Char('k') => {
+                            self.log_scroll = self.log_scroll.saturating_sub(1);
+                        }
+
                         KeyCode::Char('p') => {
                             self.step_y = !self.step_y;
                         }
@@ -211,6 +234,14 @@ impl App {
     fn on_ingest(&mut self, record: IngestRecord) {
         let id = self.get_or_create_context(record.context);
         let color = self.color_for_series(record.series_key);
+        let ts = Utc::now();
+
+        if let Some(event) = &record.event {
+            if let Some(json) = &event.parsed_json {
+                let ctx = &mut self.contexts[id];
+                collect_json_field_colors(json, &mut ctx.event_field_colors);
+            }
+        }
 
         {
             let context = &mut self.contexts[id];
@@ -227,13 +258,28 @@ impl App {
                 .unwrap()
                 .add(record.sample);
 
-            context.logs.add(format!(
+            let mut text = format!(
                 "{} -> x={} num={} den={}",
                 record.series_key.display_name(),
                 record.sample.x_us,
                 record.sample.num,
                 record.sample.den
-            ));
+            );
+
+            if let Some(event) = &record.event {
+                text.push_str(" | event");
+                if event.parsed_json.is_some() {
+                    text.push_str(":json");
+                } else {
+                    text.push_str(":raw");
+                }
+            }
+
+            context.logs.add(LogEntry {
+                ts,
+                text,
+                event: record.event,
+            });
         }
 
         if id == self.active {
@@ -453,16 +499,57 @@ impl App {
 
             for s in &ds.points {
                 if let Some((x, y)) = sample_to_plot(s, self.value_cfg, self.scale_mode) {
-                    out.push(EventGlyph {
-                        x,
-                        y,
-                        ch,
-                        color,
-                    });
+                    out.push(EventGlyph { x, y, ch, color });
                 }
             }
         }
 
         out
+    }
+
+    pub fn color_for_json_field_name(name: &str) -> Color {
+        let palette = [
+            Color::Cyan,
+            Color::Yellow,
+            Color::Green,
+            Color::Magenta,
+            Color::LightBlue,
+            Color::LightCyan,
+            Color::LightGreen,
+            Color::LightMagenta,
+            Color::LightYellow,
+            Color::Blue,
+        ];
+
+        let mut h: u64 = 1469598103934665603;
+        for b in name.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(1099511628211);
+        }
+
+        palette[(h as usize) % palette.len()]
+    }
+
+    pub fn format_log_timestamp_full(ts: chrono::DateTime<Utc>) -> String {
+        ts.format("%Y-%m-%d %H:%M:%S.%6fZ").to_string()
+    }
+}
+
+fn collect_json_field_colors(value: &serde_json::Value, cache: &mut HashMap<String, Color>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                cache
+                    .entry(k.clone())
+                    .or_insert_with(|| App::color_for_json_field_name(k));
+                collect_json_field_colors(v, cache);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_json_field_colors(item, cache);
+            }
+        }
+        _ => {}
     }
 }
