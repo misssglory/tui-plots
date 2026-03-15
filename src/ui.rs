@@ -58,6 +58,10 @@ fn draw_options(app: &App, f: &mut Frame, area: Rect) {
             "[p] step    : {}",
             if app.step_y { "on" } else { "off" }
         )),
+        ListItem::new(format!(
+            "[F] follow  : {}",
+            if app.log_follow { "on" } else { "off" }
+        )),
         ListItem::new(format!("[m] mode    : {}", app.value_cfg.mode.name())),
         ListItem::new(format!("[+] const   : {}", app.value_cfg.const_den)),
         ListItem::new(format!("[-] const   : {}", app.value_cfg.const_den)),
@@ -90,7 +94,7 @@ fn draw_logs(app: &App, f: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     for (idx, (entry, ts)) in ctx.logs.msgs.iter().zip(stripped_times.iter()).enumerate() {
-        let prefix = format!("{ts} ");
+        let prefix = format!("{:>4} {} ", idx + 1, ts);
 
         let mut top = vec![
             Span::styled(prefix, Style::default().fg(Color::DarkGray)),
@@ -101,7 +105,9 @@ fn draw_logs(app: &App, f: &mut Frame, area: Rect) {
             top.push(Span::raw(" "));
             top.push(Span::styled(
                 format!("{:+.1}%", delta),
-                Style::default().fg(pct_color(delta)).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(pct_color(delta))
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 
@@ -208,7 +214,9 @@ fn append_json_multiline(
                             Span::raw(" ".repeat(indent)),
                             Span::styled(
                                 format!("{k}:"),
-                                Style::default().fg(field_color).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(field_color)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                         ]));
                         append_json_multiline(out, v, colors, indent + 2);
@@ -218,7 +226,9 @@ fn append_json_multiline(
                             Span::raw(" ".repeat(indent)),
                             Span::styled(
                                 format!("{k}: "),
-                                Style::default().fg(field_color).add_modifier(Modifier::BOLD),
+                                Style::default()
+                                    .fg(field_color)
+                                    .add_modifier(Modifier::BOLD),
                             ),
                             Span::raw(compact_json_scalar(v)),
                         ]));
@@ -284,7 +294,7 @@ fn draw_contexts(app: &mut App, f: &mut Frame, area: Rect) {
             let age_seconds = now.signed_duration_since(c.created_at).num_seconds();
             let age_str = c.age_string();
             let created_str = c.created_at.format("%H:%M:%S").to_string();
-            let display_text = format!("{} | {} | +{}", c.name, created_str, age_str);
+            let display_text = format!("{:>3}. {} | {} | +{}", i + 1, c.name, created_str, age_str);
 
             let base_style = if i == app.active {
                 Style::default()
@@ -380,11 +390,7 @@ fn draw_chart_area(app: &App, f: &mut Frame, area: Rect) {
 
     let chart = Chart::new(datasets)
         .block(Block::bordered().title(title))
-        .x_axis(
-            Axis::default()
-                .bounds(app.window_x)
-                .labels(formatted_times),
-        )
+        .x_axis(Axis::default().bounds(app.window_x).labels(formatted_times))
         .y_axis(Axis::default().bounds(app.window_y).labels(y_labels));
 
     f.render_widget(chart, area);
@@ -396,16 +402,15 @@ fn draw_event_overlay(app: &App, f: &mut Frame, chart_area: Rect) {
     let glyphs = app.build_event_glyphs();
 
     for glyph in glyphs {
-        if let Some((x, y)) = project_to_cell(
-            plot_area,
-            app.window_x,
-            app.window_y,
-            glyph.x,
-            glyph.y,
-        ) {
+        if let Some((x, y)) =
+            project_to_cell(plot_area, app.window_x, app.window_y, glyph.x, glyph.y)
+        {
             let cell = Rect::new(x, y, 1, 1);
-            let paragraph = Paragraph::new(Line::from(glyph.ch.to_string()))
-                .style(Style::default().fg(glyph.color).add_modifier(Modifier::BOLD));
+            let paragraph = Paragraph::new(Line::from(glyph.ch.to_string())).style(
+                Style::default()
+                    .fg(glyph.color)
+                    .add_modifier(Modifier::BOLD),
+            );
             f.render_widget(paragraph, cell);
         }
     }

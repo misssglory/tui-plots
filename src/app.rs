@@ -38,6 +38,7 @@ pub struct App {
     pub auto_x: bool,
     pub auto_y: bool,
     pub step_y: bool,
+    pub log_follow: bool,
 
     pub scale_mode: ScaleMode,
     pub value_cfg: ValueConfig,
@@ -65,6 +66,7 @@ impl App {
             auto_x: true,
             auto_y: true,
             step_y: false,
+            log_follow: true,
 
             scale_mode: ScaleMode::Linear,
             value_cfg: ValueConfig::default(),
@@ -152,6 +154,16 @@ impl App {
                                 self.fit_y();
                             }
                         }
+                        KeyCode::Char('G') => {
+                            self.log_follow = !self.log_follow;
+                        }
+
+                        KeyCode::Char('F') => {
+    self.log_follow = !self.log_follow;
+    if self.log_follow {
+        self.refresh_log_scroll_tail();
+    }
+}
 
                         KeyCode::Char('x') => self.fit_x(),
                         KeyCode::Char('y') => self.fit_y(),
@@ -172,13 +184,15 @@ impl App {
                             self.log_height = self.log_height.saturating_add(1).min(30);
                         }
 
-                        KeyCode::Char('J') => {
-                            self.log_scroll = self.log_scroll.saturating_add(1);
-                        }
+KeyCode::Char('J') => {
+    self.log_follow = false;
+    self.log_scroll = self.log_scroll.saturating_add(1);
+}
 
-                        KeyCode::Char('K') => {
-                            self.log_scroll = self.log_scroll.saturating_sub(1);
-                        }
+KeyCode::Char('K') => {
+    self.log_follow = false;
+    self.log_scroll = self.log_scroll.saturating_sub(1);
+}
 
                         KeyCode::Char('p') => {
                             self.step_y = !self.step_y;
@@ -231,8 +245,24 @@ impl App {
         }
     }
 
+    fn refresh_log_scroll_tail(&mut self) {
+    if !self.log_follow {
+        return;
+    }
+
+    let ctx = self.ctx();
+    let logical_lines = ctx.logs.msgs.len() as u16 * 2;
+    let visible = self.log_height.saturating_sub(2);
+    self.log_scroll = logical_lines.saturating_sub(visible);
+}
+
     fn on_ingest(&mut self, record: IngestRecord) {
         let id = self.get_or_create_context(record.context);
+
+if id == self.active {
+    self.refresh_log_scroll_tail();
+}
+
         let color = self.color_for_series(record.series_key);
         let ts = Utc::now();
 
@@ -252,7 +282,9 @@ impl App {
             let context = &mut self.contexts[id];
 
             if !context.datasets.contains_key(&record.series_key) {
-                context.datasets.insert(record.series_key, DatasetInfo::new());
+                context
+                    .datasets
+                    .insert(record.series_key, DatasetInfo::new());
                 context.order.push(record.series_key);
                 context.colors.insert(record.series_key, color);
             }
@@ -507,7 +539,9 @@ impl App {
 
         for key in &ctx.order {
             let SeriesKey::Event(ch) = *key else { continue };
-            let Some(ds) = ctx.datasets.get(key) else { continue };
+            let Some(ds) = ctx.datasets.get(key) else {
+                continue;
+            };
             let color = *ctx.colors.get(key).unwrap_or(&Color::White);
 
             for s in &ds.points {
