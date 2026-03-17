@@ -2,6 +2,7 @@
 name = "ratatui-timeseries"
 version = "0.1.0"
 edition = "2024"
+default-run = "ratatui-timeseries"
 
 [dependencies]
 chrono = { version = "0.4.44", features = ["clock"] }
