@@ -13,3 +13,20 @@ serde_json = "1.0.149"
 # default-members = [
 #   "src/point-sender"
 # ]
+
+# 编译器 Compiler optimization configuration-balance performance and compilation speed
+[profile.release]
+opt-level = 3 # Highest optimization level (does not affect compilation speed)
+lto = "thin"#Thin LTO-balance performance and compilation speed (5-10 times faster than fat)
+codegen-units = 16 # 16 code generation units-parallel compilation (10 times faster than 1)
+panic = "abort"#Panic is abort
+Overflow-checks = false # Disable overflow checking
+debug =false # Disable debugging information
+debug-assertions = false # Disable debugging assertions
+rpath = false
+strip =true # remove symbol table
+incremental = true # incremental compilation-significantly accelerate recompilation
+
+[profile.dev]
+opt-level = 1 # Moderate optimization during development
+Overflow-checks =true # Enable overflow checking during development
