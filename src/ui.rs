@@ -11,6 +11,7 @@ use ratatui::{
 
 use crate::{
   app::App,
+  command::ArgType,
   model::{ScaleMode, SeriesKey},
   plot::{
     estimate_plot_area, format_times, format_y_labels, pct_color,
@@ -422,7 +423,7 @@ fn draw_event_overlay(app: &App, f: &mut Frame, chart_area: Rect) {
 }
 
 fn draw_command_palette(app: &App, f: &mut Frame) {
-  let area = centered_box(f.area(), 70, 14);
+  let area = centered_box(f.area(), 78, 20);
 
   f.render_widget(Clear, area);
 
@@ -432,7 +433,7 @@ fn draw_command_palette(app: &App, f: &mut Frame) {
 
   let mut lines: Vec<Line> = Vec::new();
 
-  for (i, cmd) in app.cmd_cfg.commands.iter().enumerate() {
+  for (i, spec) in app.cmd_cfg.commands.iter().enumerate() {
     let selected =
       i == app.cmd_palette.selected && !app.cmd_palette.editing_custom;
     let prefix = if selected { "> " } else { "  " };
@@ -441,7 +442,8 @@ fn draw_command_palette(app: &App, f: &mut Frame) {
     } else {
       Style::default()
     };
-    lines.push(Line::from(Span::styled(format!("{prefix}{cmd}"), style)));
+    lines
+      .push(Line::from(Span::styled(format!("{prefix}{}", spec.name), style)));
   }
 
   let custom_idx = app.cmd_cfg.commands.len();
@@ -450,9 +452,9 @@ fn draw_command_palette(app: &App, f: &mut Frame) {
   lines.push(Line::from(""));
   lines.push(Line::from(Span::styled(
     if custom_selected {
-      format!("> custom: {}", app.cmd_palette.custom_input)
+      format!("> custom raw: {}", app.cmd_palette.custom_input)
     } else {
-      format!("  custom: {}", app.cmd_palette.custom_input)
+      format!("  custom raw: {}", app.cmd_palette.custom_input)
     },
     if custom_selected {
       Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -461,11 +463,59 @@ fn draw_command_palette(app: &App, f: &mut Frame) {
     },
   )));
 
+  if !app.cmd_palette.editing_custom {
+    if let Some(spec) = app.cmd_cfg.commands.get(app.cmd_palette.selected) {
+      lines.push(Line::from(""));
+      lines.push(Line::from(Span::styled(
+        "Args",
+        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+      )));
+
+      for (i, arg) in spec.args.iter().enumerate() {
+        let focused = i == app.cmd_palette.arg_index;
+        let value = app
+          .cmd_palette
+          .arg_inputs
+          .get(i)
+          .cloned()
+          .unwrap_or_else(|| arg.default_value.clone());
+
+        let tname = match arg.arg_type {
+          ArgType::Int => "int",
+          ArgType::Float => "float",
+          ArgType::String => "string",
+        };
+
+        let style = if focused {
+          Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+        } else {
+          Style::default()
+        };
+
+        lines.push(Line::from(vec![
+          Span::raw(if focused { "> " } else { "  " }),
+          Span::styled(
+            format!("{}:{} = ", arg.name, tname),
+            style.add_modifier(Modifier::BOLD),
+          ),
+          Span::styled(value, style),
+        ]));
+      }
+
+      if spec.args.is_empty() {
+        lines.push(Line::from(Span::styled(
+          "  (no args)",
+          Style::default().fg(Color::DarkGray),
+        )));
+      }
+    }
+  }
+
   lines.push(Line::from(""));
   lines.push(Line::from(Span::styled(
-    "Enter=send  Esc=close  Tab=custom  Up/Down=select",
-    Style::default().fg(Color::DarkGray),
-  )));
+        "Enter=send  Esc=close  Up/Down=command  Tab/Right=next arg  BackTab/Left=prev arg  i=custom",
+        Style::default().fg(Color::DarkGray),
+    )));
 
   if let Some(status) = &app.cmd_palette.status {
     lines.push(Line::from(""));

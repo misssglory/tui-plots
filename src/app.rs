@@ -15,7 +15,9 @@ use ratatui::{
 };
 
 use crate::{
-  command::{CommandConfig, CommandPalette, send_json_command},
+  command::{
+    CommandConfig, CommandPalette, build_predefined_command_json, send_payload,
+  },
   model::{
     Context, DatasetInfo, EventGlyph, LogEntry, Sample, ScaleMode, SeriesKey,
     ValueConfig,
@@ -269,7 +271,9 @@ impl App {
     self.cmd_palette.open = true;
     self.cmd_palette.selected = 0;
     self.cmd_palette.editing_custom = false;
+    self.cmd_palette.arg_index = 0;
     self.cmd_palette.status = None;
+    self.cmd_palette.sync_with_selection(&self.cmd_cfg);
   }
 
   fn handle_command_palette_key(&mut self, code: KeyCode) {
@@ -287,6 +291,8 @@ impl App {
         }
         self.cmd_palette.editing_custom =
           self.cmd_palette.selected == custom_idx;
+        self.cmd_palette.arg_index = 0;
+        self.cmd_palette.sync_with_selection(&self.cmd_cfg);
       }
 
       KeyCode::Down => {
@@ -295,39 +301,85 @@ impl App {
         }
         self.cmd_palette.editing_custom =
           self.cmd_palette.selected == custom_idx;
+        self.cmd_palette.arg_index = 0;
+        self.cmd_palette.sync_with_selection(&self.cmd_cfg);
       }
 
-      KeyCode::Tab => {
+      KeyCode::Tab | KeyCode::Right => {
+        if self.cmd_palette.editing_custom {
+          return;
+        }
+        let len = self.cmd_palette.arg_inputs.len();
+        if len > 0 {
+          self.cmd_palette.arg_index = (self.cmd_palette.arg_index + 1) % len;
+        }
+      }
+
+      KeyCode::BackTab | KeyCode::Left => {
+        if self.cmd_palette.editing_custom {
+          return;
+        }
+        let len = self.cmd_palette.arg_inputs.len();
+        if len > 0 {
+          self.cmd_palette.arg_index = if self.cmd_palette.arg_index == 0 {
+            len - 1
+          } else {
+            self.cmd_palette.arg_index - 1
+          };
+        }
+      }
+
+      KeyCode::Char('i') => {
         self.cmd_palette.selected = custom_idx;
         self.cmd_palette.editing_custom = true;
+        self.cmd_palette.arg_index = 0;
+        self.cmd_palette.sync_with_selection(&self.cmd_cfg);
       }
 
       KeyCode::Backspace => {
         if self.cmd_palette.editing_custom {
           self.cmd_palette.custom_input.pop();
+        } else if let Some(v) =
+          self.cmd_palette.arg_inputs.get_mut(self.cmd_palette.arg_index)
+        {
+          v.pop();
         }
       }
 
       KeyCode::Enter => {
-        let cmd = if self.cmd_palette.selected == custom_idx {
-          self.cmd_palette.custom_input.trim().to_string()
-        } else {
-          self
-            .cmd_cfg
-            .commands
-            .get(self.cmd_palette.selected)
-            .cloned()
-            .unwrap_or_default()
-        };
+        if self.cmd_palette.editing_custom {
+          let payload = self.cmd_palette.custom_input.trim().to_string();
+          if !payload.is_empty() {
+            self.send_payload_and_log(&payload, "custom");
+          }
+        } else if let Some(spec) =
+          self.cmd_cfg.commands.get(self.cmd_palette.selected).cloned()
+        {
+          let context = self.ctx().name.clone();
 
-        if !cmd.is_empty() {
-          self.send_selected_command(&cmd);
+          match build_predefined_command_json(
+            &context,
+            &spec,
+            &self.cmd_palette.arg_inputs,
+          ) {
+            Ok(payload) => {
+              let label = spec.name.clone();
+              self.send_payload_and_log(&payload, &label);
+            }
+            Err(e) => {
+              self.cmd_palette.status = Some(e);
+            }
+          }
         }
       }
 
       KeyCode::Char(c) => {
         if self.cmd_palette.editing_custom {
           self.cmd_palette.custom_input.push(c);
+        } else if let Some(v) =
+          self.cmd_palette.arg_inputs.get_mut(self.cmd_palette.arg_index)
+        {
+          v.push(c);
         }
       }
 
@@ -335,24 +387,23 @@ impl App {
     }
   }
 
-  fn send_selected_command(&mut self, command: &str) {
+  fn send_payload_and_log(&mut self, payload: &str, label: &str) {
     let Some(addr) = self.cmd_cfg.tcp_addr.clone() else {
       self.cmd_palette.status =
         Some("command socket is not configured".to_string());
       return;
     };
 
-    let context = self.ctx().name.clone();
-    match send_json_command(&addr, &context, command) {
+    match send_payload(&addr, payload) {
       Ok(_) => {
-        self.cmd_palette.status = Some(format!("sent: {command}"));
+        self.cmd_palette.status = Some(format!("sent: {label}"));
         self.cmd_palette.open = false;
         self.cmd_palette.editing_custom = false;
 
         let active = self.active;
         self.contexts[active].logs.add(LogEntry {
           ts: Utc::now(),
-          text: format!("cmd -> {}", command),
+          text: format!("cmd -> {}", payload),
           event: None,
         });
 
