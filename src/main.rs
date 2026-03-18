@@ -16,7 +16,5 @@ fn main() -> Result<()> {
     let res = App::new().run(terminal);
     ratatui::restore();
 
-    let _ = std::fs::remove_file(protocol::SOCKET_PATH);
-
     res
 }

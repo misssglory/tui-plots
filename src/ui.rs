@@ -23,7 +23,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
   let bottom_h = if app.show_logs { app.log_height } else { 3 };
 
   let [contexts, chart, bottom] = Layout::vertical([
-    Constraint::Length(8),
+    Constraint::Length(10),
     Constraint::Fill(1),
     Constraint::Length(bottom_h),
   ])
@@ -75,6 +75,7 @@ fn draw_options(app: &App, f: &mut Frame, area: Rect) {
       "[F] follow  : {}",
       if app.log_follow { "on" } else { "off" }
     )),
+    ListItem::new(format!("[h/r] ctx x : {}", app.context_hscroll)),
   ];
 
   if app.cmd_cfg.enabled() {
@@ -151,6 +152,170 @@ fn draw_logs(app: &App, f: &mut Frame, area: Rect) {
     .scroll((app.log_scroll, 0));
 
   f.render_widget(paragraph, area);
+}
+
+fn draw_contexts(app: &mut App, f: &mut Frame, area: Rect) {
+  app.sync_context_list_state(area.height as usize);
+
+  let now = Utc::now();
+  let prefixes = app.context_state_prefixes();
+
+  let lines: Vec<Line> = app
+    .contexts
+    .iter()
+    .enumerate()
+    .map(|(i, c)| {
+      let age_seconds = now.signed_duration_since(c.created_at).num_seconds();
+      let age_str = c.age_string();
+      let created_str = c.created_at.format("%H:%M:%S").to_string();
+      let is_selected = i == app.active;
+
+      let mut spans: Vec<Span> = Vec::new();
+
+      spans.push(Span::styled(
+        if is_selected { "> " } else { "  " },
+        if is_selected {
+          Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+          Style::default().fg(Color::DarkGray)
+        },
+      ));
+
+      spans.push(Span::styled(
+        format!("{:>3}. ", i + 1),
+        Style::default().fg(Color::DarkGray),
+      ));
+
+      let context_color = if is_selected {
+        Color::Yellow
+      } else {
+        app.dim_color(Color::White, age_seconds)
+      };
+
+      spans.push(Span::styled(
+        c.name.clone(),
+        Style::default().fg(context_color).add_modifier(if is_selected {
+          Modifier::BOLD
+        } else {
+          Modifier::empty()
+        }),
+      ));
+
+      spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+      spans
+        .push(Span::styled(created_str, Style::default().fg(Color::DarkGray)));
+      spans.push(Span::styled(" | +", Style::default().fg(Color::DarkGray)));
+      spans.push(Span::styled(age_str, Style::default().fg(Color::DarkGray)));
+
+      let state_spans = build_context_state_spans(app, c, &prefixes);
+      let scrolled_state_spans =
+        slice_spans_by_chars(&state_spans, app.context_hscroll as usize);
+
+      if !scrolled_state_spans.is_empty() {
+        spans.push(Span::styled(" || ", Style::default().fg(Color::DarkGray)));
+        spans.extend(scrolled_state_spans);
+      }
+
+      Line::from(spans)
+    })
+    .collect();
+
+  let paragraph = Paragraph::new(Text::from(lines))
+    .block(Block::bordered().title("Contexts"))
+    .scroll((app.context_list_state.offset() as u16, 0))
+    .wrap(Wrap { trim: false });
+
+  f.render_widget(paragraph, area);
+}
+
+fn build_context_state_spans(
+  app: &App,
+  ctx: &crate::model::Context,
+  prefixes: &std::collections::HashMap<String, String>,
+) -> Vec<Span<'static>> {
+  let now = Utc::now();
+  let mut spans = Vec::new();
+  let mut first = true;
+
+  for item in &ctx.field_states {
+    if !first {
+      spans.push(Span::styled("  ", Style::default().fg(Color::DarkGray)));
+    }
+
+    let field_color =
+      *ctx.event_field_colors.get(&item.field).unwrap_or(&Color::Cyan);
+
+    let key = prefixes
+      .get(&item.field)
+      .cloned()
+      .unwrap_or_else(|| item.display_key.clone());
+
+    let time_text = item.event_ts.format("%H:%M:%S").to_string();
+    let elapsed =
+      format_elapsed(now.signed_duration_since(item.event_ts).num_seconds());
+
+    spans.push(Span::styled(
+      format!("{key}:"),
+      Style::default().fg(field_color).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(" ", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(
+      item.value_text.clone(),
+      Style::default().fg(Color::White),
+    ));
+    spans.push(Span::styled(" ", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(
+      format!("{time_text}|{elapsed}"),
+      Style::default().fg(Color::DarkGray),
+    ));
+
+    first = false;
+  }
+
+  spans
+}
+
+fn slice_spans_by_chars(
+  spans: &[Span<'static>],
+  skip_chars: usize,
+) -> Vec<Span<'static>> {
+  if skip_chars == 0 {
+    return spans.to_vec();
+  }
+
+  let mut remaining = skip_chars;
+  let mut out = Vec::new();
+
+  for span in spans {
+    let text = span.content.as_ref();
+    let len = text.chars().count();
+
+    if remaining >= len {
+      remaining -= len;
+      continue;
+    }
+
+    let sliced = if remaining == 0 {
+      text.to_string()
+    } else {
+      text.chars().skip(remaining).collect::<String>()
+    };
+
+    remaining = 0;
+    out.push(Span::styled(sliced, span.style));
+  }
+
+  out
+}
+
+fn format_elapsed(total_seconds: i64) -> String {
+  if total_seconds < 60 {
+    format!("{}s", total_seconds)
+  } else if total_seconds < 3600 {
+    format!("{}m{}s", total_seconds / 60, total_seconds % 60)
+  } else {
+    format!("{}h{}m", total_seconds / 3600, (total_seconds % 3600) / 60)
+  }
 }
 
 fn append_json_compact_lines(
@@ -236,7 +401,10 @@ fn append_json_multiline(
                 format!("{k}: "),
                 Style::default().fg(field_color).add_modifier(Modifier::BOLD),
               ),
-              Span::raw(compact_json_scalar(v)),
+              Span::styled(
+                compact_json_scalar(v),
+                Style::default().fg(Color::White),
+              ),
             ]));
           }
         }
@@ -262,7 +430,10 @@ fn append_json_multiline(
                 format!("[{idx}] "),
                 Style::default().fg(Color::Gray),
               ),
-              Span::raw(compact_json_scalar(item)),
+              Span::styled(
+                compact_json_scalar(item),
+                Style::default().fg(Color::White),
+              ),
             ]));
           }
         }
@@ -271,7 +442,10 @@ fn append_json_multiline(
     _ => {
       out.push(Line::from(vec![
         Span::raw(" ".repeat(indent)),
-        Span::raw(compact_json_scalar(value)),
+        Span::styled(
+          compact_json_scalar(value),
+          Style::default().fg(Color::White),
+        ),
       ]));
     }
   }
@@ -293,42 +467,6 @@ fn extract_delta_from_text(text: &str) -> Option<f64> {
   let token = rest.split_whitespace().next()?;
   let token = token.strip_suffix('%').unwrap_or(token);
   token.parse::<f64>().ok()
-}
-
-fn draw_contexts(app: &mut App, f: &mut Frame, area: Rect) {
-  app.sync_context_list_state(area.height as usize);
-
-  let now = Utc::now();
-
-  let items: Vec<ListItem> = app
-    .contexts
-    .iter()
-    .enumerate()
-    .map(|(i, c)| {
-      let age_seconds = now.signed_duration_since(c.created_at).num_seconds();
-      let age_str = c.age_string();
-      let created_str = c.created_at.format("%H:%M:%S").to_string();
-      let display_text =
-        format!("{:>3}. {} | {} | +{}", i + 1, c.name, created_str, age_str);
-
-      let base_style = if i == app.active {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-      } else {
-        let dimmed_color = app.dim_color(Color::White, age_seconds);
-        Style::default().fg(dimmed_color)
-      };
-
-      ListItem::new(display_text).style(base_style)
-    })
-    .collect();
-
-  let list = List::new(items)
-    .block(Block::bordered().title("Contexts"))
-    .highlight_style(
-      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    );
-
-  f.render_stateful_widget(list, area, &mut app.context_list_state);
 }
 
 fn draw_chart_area(app: &App, f: &mut Frame, area: Rect) {

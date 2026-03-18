@@ -19,11 +19,11 @@ use crate::{
     CommandConfig, CommandPalette, build_predefined_command_json, send_payload,
   },
   model::{
-    Context, DatasetInfo, EventGlyph, LogEntry, Sample, ScaleMode, SeriesKey,
-    ValueConfig,
+    Context, DatasetInfo, EventGlyph, FieldStateEntry, LogEntry, Sample,
+    ScaleMode, SeriesKey, ValueConfig,
   },
   plot::{format_num_per_1e9, format_ratio, pct_change, sample_to_plot},
-  protocol::{self, IngestRecord},
+  protocol::{self, IngestConfig, IngestRecord},
   ui,
 };
 
@@ -31,6 +31,9 @@ pub struct App {
   pub contexts: Vec<Context>,
   pub active: usize,
   pub context_list_state: ListState,
+
+  pub context_hscroll: u16,
+  pub watched_state_fields: Vec<String>,
 
   pub window_x: [f64; 2],
   pub window_y: [f64; 2],
@@ -53,6 +56,7 @@ pub struct App {
 
 impl App {
   pub fn new() -> Self {
+    let ingest_cfg = IngestConfig::from_env();
     let default = Context::new("default".into());
 
     let mut context_list_state = ListState::default();
@@ -62,6 +66,9 @@ impl App {
       contexts: vec![default],
       active: 0,
       context_list_state,
+
+      context_hscroll: 0,
+      watched_state_fields: ingest_cfg.state_fields,
 
       window_x: [0.0, 50.0],
       window_y: [-2.0, 2.0],
@@ -85,7 +92,8 @@ impl App {
 
   pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
     let (tx, rx) = mpsc::channel::<IngestRecord>();
-    protocol::start_socket_server(tx);
+    let ingest_cfg = IngestConfig::from_env();
+    protocol::start_tcp_server(ingest_cfg.listen_addr, tx);
 
     let tick = Duration::from_millis(50);
     let mut last = Instant::now();
@@ -114,6 +122,22 @@ impl App {
                 if self.cmd_cfg.enabled() {
                   self.open_command_palette();
                 }
+              }
+
+              KeyCode::Char('h') => {
+                self.context_hscroll = self.context_hscroll.saturating_sub(4);
+              }
+
+              KeyCode::Char('H') => {
+                self.context_hscroll = self.context_hscroll.saturating_sub(12);
+              }
+
+              KeyCode::Char('L') => {
+                self.context_hscroll = self.context_hscroll.saturating_add(12);
+              }
+
+              KeyCode::Char('r') => {
+                self.context_hscroll = self.context_hscroll.saturating_add(4);
               }
 
               KeyCode::Left => {
@@ -247,15 +271,24 @@ impl App {
             }
           }
 
-          Event::Mouse(m) => {
-            if let MouseEventKind::Down(_) = m.kind {
+          Event::Mouse(m) => match m.kind {
+            MouseEventKind::ScrollDown => {
+              self.log_follow = false;
+              self.log_scroll = self.log_scroll.saturating_add(3);
+            }
+            MouseEventKind::ScrollUp => {
+              self.log_follow = false;
+              self.log_scroll = self.log_scroll.saturating_sub(3);
+            }
+            MouseEventKind::Down(_) => {
               let index = m.row.saturating_sub(1) as usize;
               if index < self.contexts.len() {
                 self.active = index;
                 self.apply_auto_fit();
               }
             }
-          }
+            _ => {}
+          },
 
           _ => {}
         }
@@ -352,22 +385,21 @@ impl App {
           if !payload.is_empty() {
             self.send_payload_and_log(&payload, "custom");
           }
-        } else if let Some(spec) =
-          self.cmd_cfg.commands.get(self.cmd_palette.selected).cloned()
-        {
-          let context = self.ctx().name.clone();
+        } else {
+          let spec =
+            self.cmd_cfg.commands.get(self.cmd_palette.selected).cloned();
 
-          match build_predefined_command_json(
-            &context,
-            &spec,
-            &self.cmd_palette.arg_inputs,
-          ) {
-            Ok(payload) => {
-              let label = spec.name.clone();
-              self.send_payload_and_log(&payload, &label);
-            }
-            Err(e) => {
-              self.cmd_palette.status = Some(e);
+          if let Some(spec) = spec {
+            let context = self.ctx().name.clone();
+            let label = spec.name.clone();
+
+            match build_predefined_command_json(
+              &context,
+              &spec,
+              &self.cmd_palette.arg_inputs,
+            ) {
+              Ok(payload) => self.send_payload_and_log(&payload, &label),
+              Err(e) => self.cmd_palette.status = Some(e),
             }
           }
         }
@@ -470,7 +502,18 @@ impl App {
         text.push_str(" delta=n/a");
       }
 
-      context.logs.add(LogEntry { ts, text, event: record.event });
+      context.logs.add(LogEntry { ts, text, event: record.event.clone() });
+
+      if let Some(event) = &record.event {
+        if let Some(json) = &event.parsed_json {
+          update_context_field_states(
+            context,
+            json,
+            &self.watched_state_fields,
+            ts,
+          );
+        }
+      }
     }
 
     if id == self.active {
@@ -503,6 +546,29 @@ impl App {
     } else if self.active >= offset + visible {
       *self.context_list_state.offset_mut() = self.active + 1 - visible;
     }
+  }
+
+  pub fn context_state_prefixes(&self) -> HashMap<String, String> {
+    shortest_unique_prefixes(&self.watched_state_fields)
+  }
+
+  pub fn context_state_strip(&self, ctx: &Context) -> String {
+    let prefixes = self.context_state_prefixes();
+    let now = Utc::now();
+
+    let mut parts = Vec::new();
+    for item in &ctx.field_states {
+      let key = prefixes
+        .get(&item.field)
+        .cloned()
+        .unwrap_or_else(|| item.display_key.clone());
+      let t = item.event_ts.format("%H:%M:%S").to_string();
+      let elapsed =
+        format_elapsed(now.signed_duration_since(item.event_ts).num_seconds());
+      parts.push(format!("{key}: {} {}|{}", item.value_text, t, elapsed));
+    }
+
+    parts.join("  ")
   }
 
   pub fn apply_auto_fit(&mut self) {
@@ -741,6 +807,76 @@ impl App {
 
   pub fn format_log_timestamp_full(ts: chrono::DateTime<Utc>) -> String {
     ts.format("%Y-%m-%d %H:%M:%S.%6fZ").to_string()
+  }
+}
+
+fn update_context_field_states(
+  context: &mut Context,
+  json: &serde_json::Value,
+  watched_fields: &[String],
+  ts: chrono::DateTime<Utc>,
+) {
+  let Some(map) = json.as_object() else { return };
+
+  let prefixes = shortest_unique_prefixes(watched_fields);
+
+  for field in watched_fields {
+    let Some(v) = map.get(field) else { continue };
+    let value_text = compact_json_scalar(v);
+    let display_key =
+      prefixes.get(field).cloned().unwrap_or_else(|| field.clone());
+
+    context.field_states.push_back(FieldStateEntry {
+      field: field.clone(),
+      display_key,
+      value_text,
+      event_ts: ts,
+    });
+
+    while context.field_states.len() > 64 {
+      context.field_states.pop_front();
+    }
+  }
+}
+
+fn shortest_unique_prefixes(fields: &[String]) -> HashMap<String, String> {
+  let mut out = HashMap::new();
+
+  for field in fields {
+    let mut best = field.clone();
+
+    for len in 1..=field.chars().count() {
+      let prefix: String = field.chars().take(len).collect();
+      let count =
+        fields.iter().filter(|other| other.starts_with(&prefix)).count();
+      if count == 1 {
+        best = prefix;
+        break;
+      }
+    }
+
+    out.insert(field.clone(), best);
+  }
+
+  out
+}
+
+fn format_elapsed(total_seconds: i64) -> String {
+  if total_seconds < 60 {
+    format!("{}s", total_seconds)
+  } else if total_seconds < 3600 {
+    format!("{}m{}s", total_seconds / 60, total_seconds % 60)
+  } else {
+    format!("{}h{}m", total_seconds / 3600, (total_seconds % 3600) / 60)
+  }
+}
+
+fn compact_json_scalar(v: &serde_json::Value) -> String {
+  match v {
+    serde_json::Value::String(s) => s.clone(),
+    _ => {
+      serde_json::to_string(v).unwrap_or_else(|_| "<invalid-json>".to_string())
+    }
   }
 }
 
