@@ -342,7 +342,8 @@ impl App {
         if self.cmd_palette.editing_custom {
           return;
         }
-        let len = self.cmd_palette.arg_inputs.len();
+
+        let len = self.cmd_palette.current_arg_inputs(&self.cmd_cfg).len();
         if len > 0 {
           self.cmd_palette.arg_index = (self.cmd_palette.arg_index + 1) % len;
         }
@@ -352,7 +353,8 @@ impl App {
         if self.cmd_palette.editing_custom {
           return;
         }
-        let len = self.cmd_palette.arg_inputs.len();
+
+        let len = self.cmd_palette.current_arg_inputs(&self.cmd_cfg).len();
         if len > 0 {
           self.cmd_palette.arg_index = if self.cmd_palette.arg_index == 0 {
             len - 1
@@ -372,10 +374,15 @@ impl App {
       KeyCode::Backspace => {
         if self.cmd_palette.editing_custom {
           self.cmd_palette.custom_input.pop();
-        } else if let Some(v) =
-          self.cmd_palette.arg_inputs.get_mut(self.cmd_palette.arg_index)
-        {
-          v.pop();
+        } else {
+          let arg_index = self.cmd_palette.arg_index;
+          if let Some(inputs) =
+            self.cmd_palette.current_arg_inputs_mut(&self.cmd_cfg)
+          {
+            if let Some(v) = inputs.get_mut(arg_index) {
+              v.pop();
+            }
+          }
         }
       }
 
@@ -392,12 +399,10 @@ impl App {
           if let Some(spec) = spec {
             let context = self.ctx().name.clone();
             let label = spec.name.clone();
+            let inputs =
+              self.cmd_palette.current_arg_inputs(&self.cmd_cfg).to_vec();
 
-            match build_predefined_command_json(
-              &context,
-              &spec,
-              &self.cmd_palette.arg_inputs,
-            ) {
+            match build_predefined_command_json(&context, &spec, &inputs) {
               Ok(payload) => self.send_payload_and_log(&payload, &label),
               Err(e) => self.cmd_palette.status = Some(e),
             }
@@ -408,10 +413,15 @@ impl App {
       KeyCode::Char(c) => {
         if self.cmd_palette.editing_custom {
           self.cmd_palette.custom_input.push(c);
-        } else if let Some(v) =
-          self.cmd_palette.arg_inputs.get_mut(self.cmd_palette.arg_index)
-        {
-          v.push(c);
+        } else {
+          let arg_index = self.cmd_palette.arg_index;
+          if let Some(inputs) =
+            self.cmd_palette.current_arg_inputs_mut(&self.cmd_cfg)
+          {
+            if let Some(v) = inputs.get_mut(arg_index) {
+              v.push(c);
+            }
+          }
         }
       }
 
@@ -550,25 +560,6 @@ impl App {
 
   pub fn context_state_prefixes(&self) -> HashMap<String, String> {
     shortest_unique_prefixes(&self.watched_state_fields)
-  }
-
-  pub fn context_state_strip(&self, ctx: &Context) -> String {
-    let prefixes = self.context_state_prefixes();
-    let now = Utc::now();
-
-    let mut parts = Vec::new();
-    for item in &ctx.field_states {
-      let key = prefixes
-        .get(&item.field)
-        .cloned()
-        .unwrap_or_else(|| item.display_key.clone());
-      let t = item.event_ts.format("%H:%M:%S").to_string();
-      let elapsed =
-        format_elapsed(now.signed_duration_since(item.event_ts).num_seconds());
-      parts.push(format!("{key}: {} {}|{}", item.value_text, t, elapsed));
-    }
-
-    parts.join("  ")
   }
 
   pub fn apply_auto_fit(&mut self) {
@@ -859,16 +850,6 @@ fn shortest_unique_prefixes(fields: &[String]) -> HashMap<String, String> {
   }
 
   out
-}
-
-fn format_elapsed(total_seconds: i64) -> String {
-  if total_seconds < 60 {
-    format!("{}s", total_seconds)
-  } else if total_seconds < 3600 {
-    format!("{}m{}s", total_seconds / 60, total_seconds % 60)
-  } else {
-    format!("{}h{}m", total_seconds / 3600, (total_seconds % 3600) / 60)
-  }
 }
 
 fn compact_json_scalar(v: &serde_json::Value) -> String {

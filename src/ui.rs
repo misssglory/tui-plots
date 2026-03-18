@@ -613,7 +613,7 @@ fn draw_command_palette(app: &App, f: &mut Frame) {
         let focused = i == app.cmd_palette.arg_index;
         let value = app
           .cmd_palette
-          .arg_inputs
+          .current_arg_inputs(&app.cmd_cfg)
           .get(i)
           .cloned()
           .unwrap_or_else(|| arg.default_value.clone());
