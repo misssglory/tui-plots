@@ -1,4 +1,8 @@
 use color_eyre::Result;
+use crossterm::{
+  event::{DisableBracketedPaste, EnableBracketedPaste},
+  execute,
+};
 
 mod app;
 mod command;
@@ -10,11 +14,13 @@ mod ui;
 use app::App;
 
 fn main() -> Result<()> {
-    color_eyre::install()?;
+  color_eyre::install()?;
 
-    let terminal = ratatui::init();
-    let res = App::new().run(terminal);
-    ratatui::restore();
+  execute!(std::io::stdout(), EnableBracketedPaste)?;
+  let terminal = ratatui::init();
+  let res = App::new().run(terminal);
+  ratatui::restore();
+  let _ = execute!(std::io::stdout(), DisableBracketedPaste);
 
-    res
+  res
 }

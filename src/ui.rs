@@ -41,6 +41,10 @@ pub fn draw(app: &mut App, f: &mut Frame) {
   if app.cmd_palette.open {
     draw_command_palette(app, f);
   }
+
+  if app.context_input.open {
+    draw_context_input_popup(app, f);
+  }
 }
 
 fn draw_options(app: &App, f: &mut Frame, area: Rect) {
@@ -76,6 +80,7 @@ fn draw_options(app: &App, f: &mut Frame, area: Rect) {
       if app.log_follow { "on" } else { "off" }
     )),
     ListItem::new(format!("[h/r] ctx x : {}", app.context_hscroll)),
+    ListItem::new("[n] new ctx".to_string()),
   ];
 
   if app.cmd_cfg.enabled() {
@@ -226,6 +231,50 @@ fn draw_contexts(app: &mut App, f: &mut Frame, area: Rect) {
     .wrap(Wrap { trim: false });
 
   f.render_widget(paragraph, area);
+}
+
+fn draw_context_input_popup(app: &App, f: &mut Frame) {
+  let area = centered_box(f.area(), 70, 7);
+
+  f.render_widget(Clear, area);
+
+  let block = Block::bordered().title("New Context");
+  let inner = block.inner(area);
+  f.render_widget(block, area);
+
+  let mut lines = vec![
+    Line::from(Span::styled(
+      "Type or paste a context name",
+      Style::default().fg(Color::Gray),
+    )),
+    Line::from(""),
+    Line::from(vec![
+      Span::styled(
+        "> ",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+      ),
+      Span::styled(
+        app.context_input.value.clone(),
+        Style::default().fg(Color::White),
+      ),
+    ]),
+    Line::from(""),
+    Line::from(Span::styled(
+      "Enter=create/select  Esc=close  Ctrl+V=paste clipboard",
+      Style::default().fg(Color::DarkGray),
+    )),
+  ];
+
+  if let Some(status) = &app.context_input.status {
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+      status.clone(),
+      Style::default().fg(Color::LightRed),
+    )));
+  }
+
+  let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+  f.render_widget(p, inner);
 }
 
 fn build_context_state_spans(

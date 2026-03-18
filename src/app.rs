@@ -8,7 +8,9 @@ use chrono::Utc;
 use color_eyre::Result;
 use ratatui::{
   DefaultTerminal,
-  crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseEventKind},
+  crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+  },
   style::Color,
   symbols,
   widgets::ListState,
@@ -26,6 +28,13 @@ use crate::{
   protocol::{self, IngestConfig, IngestRecord},
   ui,
 };
+
+#[derive(Debug, Clone, Default)]
+pub struct ContextInput {
+  pub open: bool,
+  pub value: String,
+  pub status: Option<String>,
+}
 
 pub struct App {
   pub contexts: Vec<Context>,
@@ -52,6 +61,8 @@ pub struct App {
 
   pub cmd_cfg: CommandConfig,
   pub cmd_palette: CommandPalette,
+
+  pub context_input: ContextInput,
 }
 
 impl App {
@@ -87,6 +98,8 @@ impl App {
 
       cmd_cfg: CommandConfig::from_env(),
       cmd_palette: CommandPalette::default(),
+
+      context_input: ContextInput::default(),
     }
   }
 
@@ -109,7 +122,24 @@ impl App {
 
       if event::poll(timeout)? {
         match event::read()? {
+          Event::Paste(data) => {
+            if self.context_input.open {
+              self.handle_context_paste(&data);
+              continue;
+            }
+
+            if self.cmd_palette.open && self.cmd_palette.editing_custom {
+              self.cmd_palette.custom_input.push_str(&data);
+              continue;
+            }
+          }
+
           Event::Key(k) if k.kind == KeyEventKind::Press => {
+            if self.context_input.open {
+              self.handle_context_input_key(k);
+              continue;
+            }
+
             if self.cmd_palette.open {
               self.handle_command_palette_key(k.code);
               continue;
@@ -117,6 +147,10 @@ impl App {
 
             match k.code {
               KeyCode::Char('q') => return Ok(()),
+
+              KeyCode::Char('n') => {
+                self.open_context_input();
+              }
 
               KeyCode::Char(':') => {
                 if self.cmd_cfg.enabled() {
@@ -141,7 +175,7 @@ impl App {
               }
 
               KeyCode::Left => {
-                if k.modifiers.contains(event::KeyModifiers::CONTROL) {
+                if k.modifiers.contains(KeyModifiers::CONTROL) {
                   self.scale_x(0.8);
                 } else {
                   self.scroll_x(-0.005);
@@ -149,7 +183,7 @@ impl App {
               }
 
               KeyCode::Right => {
-                if k.modifiers.contains(event::KeyModifiers::CONTROL) {
+                if k.modifiers.contains(KeyModifiers::CONTROL) {
                   self.scale_x(1.2);
                 } else {
                   self.scroll_x(0.005);
@@ -298,6 +332,67 @@ impl App {
         last = Instant::now();
       }
     }
+  }
+
+  fn open_context_input(&mut self) {
+    self.context_input.open = true;
+    self.context_input.status = None;
+  }
+
+  fn handle_context_input_key(&mut self, k: KeyEvent) {
+    match k.code {
+      KeyCode::Esc => {
+        self.context_input.open = false;
+        self.context_input.status = None;
+      }
+      KeyCode::Enter => {
+        self.submit_context_input();
+      }
+      KeyCode::Backspace => {
+        self.context_input.value.pop();
+      }
+      KeyCode::Char('v') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+        self.paste_context_from_clipboard();
+      }
+      KeyCode::Char(c) => {
+        self.context_input.value.push(c);
+      }
+      _ => {}
+    }
+  }
+
+  fn handle_context_paste(&mut self, data: &str) {
+    self.context_input.value.push_str(data);
+    sanitize_context_input(&mut self.context_input.value);
+  }
+
+  fn paste_context_from_clipboard(&mut self) {
+    match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+      Ok(text) => {
+        self.context_input.value.push_str(&text);
+        sanitize_context_input(&mut self.context_input.value);
+        self.context_input.status = Some("pasted from clipboard".to_string());
+      }
+      Err(e) => {
+        self.context_input.status = Some(format!("clipboard error: {e}"));
+      }
+    }
+  }
+
+  fn submit_context_input(&mut self) {
+    sanitize_context_input(&mut self.context_input.value);
+
+    let name = self.context_input.value.trim().to_string();
+    if name.is_empty() {
+      self.context_input.status = Some("context cannot be empty".to_string());
+      return;
+    }
+
+    let idx = self.get_or_create_context(name);
+    self.active = idx;
+    self.apply_auto_fit();
+    self.context_input.open = false;
+    self.context_input.status = None;
   }
 
   fn open_command_palette(&mut self) {
@@ -799,6 +894,14 @@ impl App {
   pub fn format_log_timestamp_full(ts: chrono::DateTime<Utc>) -> String {
     ts.format("%Y-%m-%d %H:%M:%S.%6fZ").to_string()
   }
+}
+
+fn sanitize_context_input(s: &mut String) {
+  *s = s
+    .chars()
+    .filter(|c| *c != '\n' && *c != '\r' && *c != '\t')
+    .take(50)
+    .collect();
 }
 
 fn update_context_field_states(
